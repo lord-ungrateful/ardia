@@ -1,8 +1,11 @@
 import type { ReactNode } from "react";
 import { Pressable, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
-import { radius as radii, useHover, useTheme, type Radius } from "../ui";
+import { ink, radius as radii, useHover, useTheme, type Radius } from "../ui";
 import { selectableCard } from "./tokens";
 import { useSettingsColors } from "./useSettingsColors";
+import { PLATFORM_RENDERING } from "../../lib/platformRendering";
+
+const ringOverOutset = (width: number) => ({ position: "absolute", top: -width, left: -width, right: -width, bottom: -width }) as const;
 
 export function SelectableCard({
   selected,
@@ -38,21 +41,17 @@ export function SelectableCard({
       : fill && !dashed
         ? theme.groupFill
         : undefined;
+  const ring = {
+    borderRadius: radii[radius],
+    borderWidth: selected || dashed ? selectableCard.selectedBorder : StyleSheet.hairlineWidth * 2,
+    borderStyle: dashed ? "dashed" : "solid",
+    borderColor: selected ? theme.formAccent : dashed ? look.dashedBorder : theme.groupBorder,
+  } as const;
+  const ringOver = PLATFORM_RENDERING.bordersDrawUnderChildren;
   const card = (
-    <View
-      style={[
-        {
-          borderRadius: radii[radius],
-          borderWidth: selected || dashed ? selectableCard.selectedBorder : StyleSheet.hairlineWidth * 2,
-          borderStyle: dashed ? "dashed" : "solid",
-          borderColor: selected ? theme.formAccent : dashed ? look.dashedBorder : theme.groupBorder,
-          backgroundColor,
-          overflow: "hidden",
-        },
-        style,
-      ]}
-    >
+    <View style={[ring, ringOver ? { borderColor: ink.clear } : null, { backgroundColor, overflow: "hidden" }, style]}>
       {children}
+      {ringOver ? <View pointerEvents="none" style={[ring, ringOverOutset(ring.borderWidth)]} /> : null}
     </View>
   );
   if (!onPress) return card;
