@@ -615,7 +615,7 @@ struct WindowManager {
           ManagedWindow *found = Find(id);
           if (!found) return;
           try {
-            if (args.DidSizeChange() || (args.DidPositionChange() && !m_tracking)) EmitFrame(*found);
+            if (args.DidSizeChange() || (args.DidPositionChange() && !(m_tracking && id == m_dragId))) EmitFrame(*found);
             if (args.DidSizeChange()) ApplyInputRegions(*found);
             if (args.DidSizeChange() || args.DidPresenterChange()) ReportMaximized(*found);
             if (args.DidPresenterChange()) {
@@ -741,6 +741,7 @@ struct WindowManager {
   }
 
   void StartAppDrag(ManagedWindow &entry) noexcept {
+    if (m_tracking) return;
     POINT cursor{};
     GetCursorPos(&cursor);
     try {
@@ -932,7 +933,10 @@ struct WindowManager {
           if (m_dragFromMaximized) RestoreUnderCursor(*moving);
           timer.Stop();
           timer.Tick(*token);
-          if (!FollowPointer(*moving)) m_tracking = false;
+          if (!FollowPointer(*moving)) {
+            m_tracking = false;
+            EmitFrame(*moving);
+          }
           return;
         }
         m_tracking = false;
@@ -952,9 +956,12 @@ struct WindowManager {
     int frames{0};
     int behind{0};
     int64_t ms{0};
+    winrt::Windows::Graphics::PointInt32 startedAt{};
+    bool fromMaximized{false};
   };
 
   static constexpr int kFramesToWaitForAMove = 3;
+  static constexpr double kShortestFrameMs = 0.5;
 
   bool FollowPointer(ManagedWindow &entry) noexcept {
     HWND hwnd = entry.hwnd;
@@ -969,10 +976,14 @@ struct WindowManager {
     POINT origin{m_dragOrigin.X + rect.left - position.X, m_dragOrigin.Y + rect.top - position.Y};
     POINT anchor = m_dragCursor;
     std::string id = entry.id;
+    auto startedAt = m_dragOrigin;
+    bool fromMaximized = m_dragFromMaximized;
     auto queue = Host::Current()->queue.DispatcherQueue();
     try {
-      std::thread([this, hwnd, origin, anchor, id, queue]() noexcept {
+      std::thread([this, hwnd, origin, anchor, id, queue, startedAt, fromMaximized]() noexcept {
         PointerFollow follow = TrackPointerEachFrame(hwnd, origin, anchor);
+        follow.startedAt = startedAt;
+        follow.fromMaximized = fromMaximized;
         queue.TryEnqueue([this, id, follow]() noexcept { PointerFollowEnded(id, follow); });
       }).detach();
     } catch (...) {
@@ -987,7 +998,7 @@ struct WindowManager {
     POINT sent{LONG_MIN, LONG_MIN};
     int waited = 0;
     while (IsWindow(hwnd)) {
-      if (FAILED(DwmFlush())) Sleep(1);
+      WaitForNextFrame();
       ++follow.frames;
       if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) {
         follow.cancelled = true;
@@ -1012,8 +1023,19 @@ struct WindowManager {
       SetWindowPos(hwnd, nullptr, target.x, target.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
       ++follow.moves;
     }
+    for (int frame = 0; sent.x != LONG_MIN && frame < kFramesToWaitForAMove && IsWindow(hwnd); ++frame) {
+      RECT at{};
+      if (GetWindowRect(hwnd, &at) && at.left == sent.x && at.top == sent.y) break;
+      WaitForNextFrame();
+    }
     follow.ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
     return follow;
+  }
+
+  static void WaitForNextFrame() noexcept {
+    auto asked = std::chrono::steady_clock::now();
+    bool flushed = SUCCEEDED(DwmFlush());
+    if (!flushed || std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - asked).count() < kShortestFrameMs) Sleep(1);
   }
 
   void PointerFollowEnded(std::string const &id, PointerFollow const &follow) noexcept {
@@ -1021,10 +1043,10 @@ struct WindowManager {
     ManagedWindow *moving = Find(id);
     if (!moving) return;
     try {
-      if (follow.cancelled && m_dragFromMaximized) {
+      if (follow.cancelled && follow.fromMaximized) {
         if (auto presenter = OverlappedOf(*moving)) presenter.Maximize();
       } else if (follow.cancelled) {
-        moving->appWindow.Move(m_dragOrigin);
+        moving->appWindow.Move(follow.startedAt);
       } else {
         MaximizeAtTopEdge(*moving, follow.released);
       }
