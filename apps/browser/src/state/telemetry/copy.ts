@@ -203,6 +203,7 @@ const ADDED_ITEMS = {
   Usage: [
     "How many times the first-launch intro was shown, how many of those started with its music muted, and how many were skipped, summed up once an hour",
     "On Windows, how many animations ran and how many of their frames came late, summed up once an hour",
+    "On Windows, how many times you moved a window by dragging its toolbar, how many steps those drags moved it and for how long, summed up once an hour",
     "On Windows, how many links Ardia opened that it was started with while it wasn't running, summed up once an hour. Never which links or which app",
     "How many times you asked to make Ardia your default browser (on Windows, how many times that opened Windows Settings), and whether Ardia was your default browser when it started, summed up once an hour",
     "How many times the command bar completed an address inline as you typed, summed up once an hour. Never what you typed or which address",

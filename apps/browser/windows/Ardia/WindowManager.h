@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <commctrl.h>
@@ -595,6 +597,17 @@ struct WindowManager {
     }
   }
 
+  void EmitFrame(ManagedWindow &entry) noexcept {
+    auto frame = FrameOf(entry);
+    winrt::Microsoft::ReactNative::JSValueArray values;
+    for (double value : frame) values.push_back(value);
+    winrt::Microsoft::ReactNative::JSValueObject event;
+    event["type"] = "frame";
+    event["id"] = entry.id;
+    event["frame"] = std::move(values);
+    EmitWindow(std::move(event));
+  }
+
   void Watch(ManagedWindow &entry) noexcept {
     std::string id = entry.id;
     entry.changed = entry.appWindow.Changed(
@@ -602,16 +615,7 @@ struct WindowManager {
           ManagedWindow *found = Find(id);
           if (!found) return;
           try {
-            if (args.DidPositionChange() || args.DidSizeChange()) {
-              auto frame = FrameOf(*found);
-              winrt::Microsoft::ReactNative::JSValueArray values;
-              for (double value : frame) values.push_back(value);
-              winrt::Microsoft::ReactNative::JSValueObject event;
-              event["type"] = "frame";
-              event["id"] = id;
-              event["frame"] = std::move(values);
-              EmitWindow(std::move(event));
-            }
+            if (args.DidSizeChange() || (args.DidPositionChange() && !m_tracking)) EmitFrame(*found);
             if (args.DidSizeChange()) ApplyInputRegions(*found);
             if (args.DidSizeChange() || args.DidPresenterChange()) ReportMaximized(*found);
             if (args.DidPresenterChange()) {
@@ -921,30 +925,16 @@ struct WindowManager {
         bool held = LeftButtonDown();
         POINT now{};
         GetCursorPos(&now);
-        if (moving && cancelled && m_dragMoved) {
-          try {
-            if (m_dragFromMaximized) {
-              if (auto presenter = OverlappedOf(*moving)) presenter.Maximize();
-            } else {
-              moving->appWindow.Move(m_dragOrigin);
-            }
-          } catch (...) {
-          }
-        }
         if (moving && !cancelled && held && !m_systemMove) {
           bool beyondSlop = std::abs(now.x - m_dragCursor.x) >= GetSystemMetrics(SM_CXDRAG) || std::abs(now.y - m_dragCursor.y) >= GetSystemMetrics(SM_CYDRAG);
-          if (!m_dragMoved && !beyondSlop) return;
-          if (!m_dragMoved) {
-            m_dragMoved = true;
-            if (m_dragFromMaximized) RestoreUnderCursor(*moving);
-          }
-          try {
-            moving->appWindow.Move({m_dragOrigin.X + now.x - m_dragCursor.x, m_dragOrigin.Y + now.y - m_dragCursor.y});
-          } catch (...) {
-          }
+          if (!beyondSlop) return;
+          m_dragMoved = true;
+          if (m_dragFromMaximized) RestoreUnderCursor(*moving);
+          timer.Stop();
+          timer.Tick(*token);
+          if (!FollowPointer(*moving)) m_tracking = false;
           return;
         }
-        if (moving && !cancelled && !held && m_dragMoved && !m_systemMove) MaximizeAtTopEdge(*moving, now);
         m_tracking = false;
         timer.Stop();
         timer.Tick(*token);
@@ -953,6 +943,102 @@ struct WindowManager {
     } catch (...) {
       m_tracking = false;
     }
+  }
+
+  struct PointerFollow {
+    bool cancelled{false};
+    POINT released{};
+    int moves{0};
+    int frames{0};
+    int behind{0};
+    int64_t ms{0};
+  };
+
+  static constexpr int kFramesToWaitForAMove = 3;
+
+  bool FollowPointer(ManagedWindow &entry) noexcept {
+    HWND hwnd = entry.hwnd;
+    RECT rect{};
+    winrt::Windows::Graphics::PointInt32 position{};
+    try {
+      position = entry.appWindow.Position();
+    } catch (...) {
+      return false;
+    }
+    if (!hwnd || !GetWindowRect(hwnd, &rect)) return false;
+    POINT origin{m_dragOrigin.X + rect.left - position.X, m_dragOrigin.Y + rect.top - position.Y};
+    POINT anchor = m_dragCursor;
+    std::string id = entry.id;
+    auto queue = Host::Current()->queue.DispatcherQueue();
+    try {
+      std::thread([this, hwnd, origin, anchor, id, queue]() noexcept {
+        PointerFollow follow = TrackPointerEachFrame(hwnd, origin, anchor);
+        queue.TryEnqueue([this, id, follow]() noexcept { PointerFollowEnded(id, follow); });
+      }).detach();
+    } catch (...) {
+      return false;
+    }
+    return true;
+  }
+
+  static PointerFollow TrackPointerEachFrame(HWND hwnd, POINT origin, POINT anchor) noexcept {
+    PointerFollow follow;
+    auto began = std::chrono::steady_clock::now();
+    POINT sent{LONG_MIN, LONG_MIN};
+    int waited = 0;
+    while (IsWindow(hwnd)) {
+      if (FAILED(DwmFlush())) Sleep(1);
+      ++follow.frames;
+      if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) {
+        follow.cancelled = true;
+        break;
+      }
+      POINT now{};
+      GetCursorPos(&now);
+      if (!LeftButtonDown()) {
+        follow.released = now;
+        break;
+      }
+      POINT target{origin.x + now.x - anchor.x, origin.y + now.y - anchor.y};
+      if (target.x == sent.x && target.y == sent.y) continue;
+      RECT at{};
+      bool arrived = sent.x == LONG_MIN || (GetWindowRect(hwnd, &at) && at.left == sent.x && at.top == sent.y);
+      if (!arrived && ++waited < kFramesToWaitForAMove) {
+        ++follow.behind;
+        continue;
+      }
+      waited = 0;
+      sent = target;
+      SetWindowPos(hwnd, nullptr, target.x, target.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+      ++follow.moves;
+    }
+    follow.ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
+    return follow;
+  }
+
+  void PointerFollowEnded(std::string const &id, PointerFollow const &follow) noexcept {
+    m_tracking = false;
+    ManagedWindow *moving = Find(id);
+    if (!moving) return;
+    try {
+      if (follow.cancelled && m_dragFromMaximized) {
+        if (auto presenter = OverlappedOf(*moving)) presenter.Maximize();
+      } else if (follow.cancelled) {
+        moving->appWindow.Move(m_dragOrigin);
+      } else {
+        MaximizeAtTopEdge(*moving, follow.released);
+      }
+    } catch (...) {
+    }
+    EmitFrame(*moving);
+    int64_t perSecond = follow.ms > 0 ? follow.moves * 1000 / follow.ms : 0;
+    LaunchLog::Write(L"window", std::wstring(L"drag ended on ").append(Paths::Wide(id)).append(L": ").append(std::to_wstring(follow.moves)).append(L" moves in ").append(std::to_wstring(follow.ms)).append(L" ms, ").append(std::to_wstring(perSecond)).append(L" per second over ").append(std::to_wstring(follow.frames)).append(L" frames, ").append(std::to_wstring(follow.behind)).append(L" frames waiting for the window to catch up").append(follow.cancelled ? L", cancelled" : L""));
+    winrt::Microsoft::ReactNative::JSValueObject event;
+    event["type"] = "dragEnded";
+    event["id"] = id;
+    event["moves"] = follow.moves;
+    event["ms"] = follow.ms;
+    EmitWindow(std::move(event));
   }
 
   static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR reference) noexcept {

@@ -178,7 +178,17 @@ what differs; the Mac's list is `docs/dia-feature-parity.md`. Rows marked "hidde
     The header stays for a profile indicator, an incognito window, the address row, and a right sidebar.
   - Moving the window: a drag region is a view that moves the window when the UI's own hit-testing gives it the press,
     so a control on top of it still clicks, and the app moves the window while the button is down (Escape puts it
-    back, a maximized window restores under the pointer, a release at the top edge maximizes). The UI also marks
+    back, a maximized window restores under the pointer, a release at the top edge maximizes). Once the pointer passes
+    the drag threshold, a thread of its own wakes once per composited frame (`DwmFlush`, so 240 times a second on a
+    240 Hz display) and posts the window's new place with `SetWindowPos(SWP_ASYNCWINDOWPOS)`, in place of the 8 ms
+    UI-thread timer it used to poll on. A synchronous move cost the UI thread about 4.4 ms, longer than a 240 Hz
+    frame, so it held drags to every other frame. The thread posts the next place only once the window has reached
+    the last one (or after 3 frames), so moves never queue up behind a busy UI thread, and position-only `frame`
+    events to JS wait until the drag ends. The launch log says
+    `drag ended on <id>: <n> moves in <ms> ms, <n> per second over <n> frames, <n> frames waiting for the window to
+    catch up`, and the hourly `usage_counts` carry `window_drags`,
+    `window_drag_moves` and `window_drag_ms` where sharing is on: moves over time well under the display's refresh
+    rate means drags stutter in the field. The UI also marks
     caption regions for Windows (`captionRegions` in `state/windows/layout.ts`, sent by `state/windows/captionRegions.ts`
     through `platform/windowControls.windows.ts`): the gap beside the window buttons and the gutter above the card,
     where nothing else sits. Windows moves the window itself from those, so its snap, drag off a maximized window,

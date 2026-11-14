@@ -17,7 +17,8 @@ export type WindowEvent =
   | { type: "fullScreen"; id: string; on: boolean }
   | { type: "maximized"; id: string; on: boolean }
   | { type: "sidebarEdge"; id: string; over: boolean; point: [number, number] }
-  | { type: "closeRequest"; id: string };
+  | { type: "closeRequest"; id: string }
+  | { type: "dragEnded"; id: string; moves: number; ms: number };
 
 export type OpenWindowOptions = {
   frame?: [number, number, number, number] | null;
