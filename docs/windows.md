@@ -335,8 +335,20 @@ is plain Chromium.
   or shortcuts of its own (the `chromium-win-hosted-*` patches), and each shows one page: its active tab. Each is
   a borderless top-level window owned by the app's window, placed over the page's view: it stays above its owner, hides
   and minimizes with it, and follows it when it moves. It cannot be a child window: with the Windows App SDK in a
-  window, no mouse message for a child of it reaches the UI thread (`ARDIA_INPUT_TRACE=<file>` logs what does). A window
-  Chromium opens by itself (a link opened in a new window) stays off screen until the app adopts its tabs.
+  window, no mouse message for a child of it reaches the UI thread (`ARDIA_INPUT_TRACE=<file>` logs what does). Being
+  top level, a page window is one a tool such as AltDrag or a tiling window manager can grab and move on its own, so
+  the app docks each page window it sees shown under one of its windows (`PageDock.h`): a move or resize that would
+  change the page's offset from its owner, or its size, is turned into a no-op unless it happens inside one of the
+  app's own engine calls (`hostCall`, where `tab.show` places the page) or the page is hidden (the engine parks hidden
+  pages off screen). The refused change is passed on to the owner, as a move by the same amount or the same edges
+  resized, so AltDrag on a page moves or resizes the whole Ardia window (not while it is maximized or minimized);
+  passing it on is posted, and a newer request replaces one not yet run. A page maximized or minimized from outside
+  (AltDrag's drag to the top edge) is put back as it was, without activating it, and its owner is maximized or
+  minimized instead. Following the owner keeps the offset, so the engine's `ParentMoved` still moves the page with
+  its window however that window was moved. Whether a request came from another thread can't tell these apart: a tool
+  that moves windows with `SWP_ASYNCWINDOWPOS` reaches the page as the page's own thread's work. The launch log says
+  `page windows dock to their app window` once, and `page window kept docked: refused ...` with the asked and docked
+  geometry for the first 5 refusals. A window Chromium opens by itself (a link opened in a new window) stays off screen until the app adopts its tabs.
 - The verbs: `tab.create` (a key, a profile, a URL or a tab to adopt; the same key again moves the tab to the window
   that asks), `tab.show` (visible, and where in the window, in the UI's points; a corner radius and holes),
   `tab.close`, `tab.call` (load, back, forward, reload, stop, find, zoom, scripts, DevTools, print, site info and the

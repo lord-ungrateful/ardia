@@ -209,6 +209,7 @@ struct EngineHostModule {
       const ArdiaEngineApi *engine = Host::Engine();
       if (!engine) return reply.Resolve(std::string{EngineHostParts::NoEngine});
       HWND window = windowId.empty() ? nullptr : WindowManager::Shared().Hwnd(windowId);
+      PageDock::EngineCallScope placing;
       engine->hostCall(verb.c_str(), argsJson.c_str(), reinterpret_cast<uint64_t>(window), &EngineHostParts::OnReply, new Reply(reply));
     });
   }

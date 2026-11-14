@@ -23,6 +23,7 @@
 #include "Events.h"
 #include "Host.h"
 #include "ModalThread.h"
+#include "PageDock.h"
 #include "LaunchLog.h"
 #include "LaunchConfig.h"
 #include "Paths.h"
@@ -89,6 +90,7 @@ struct WindowManager {
 
   void Attach(winrt::Microsoft::ReactNative::ReactContext const &context) noexcept {
     m_context = context;
+    PageDock::Install([this](HWND owner) noexcept { return FindByHwnd(owner) != nullptr; });
   }
 
   void Detach() noexcept {
